@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(test:*)",
+      "Read(//c/Users/HP/**)",
+      "Bash(del \"C:\\\\Users\\\\HP\\\\Lejerli\\\\auth\\\\passport.js\")",
+      "Bash(node -e:*)",
+      "Bash(npx create-expo-app@latest Lejerli-frontend --template blank-typescript)",
+      "Bash(npm install:*)",
+      "Bash(chmod +x \"C:\\\\Users\\\\HP\\\\Lejerli-frontend\\\\start-app.sh\")"
+    ]
+  }
+}

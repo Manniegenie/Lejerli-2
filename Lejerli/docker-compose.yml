@@ -1,0 +1,120 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Lejerli Technologies — Docker Compose
+#  Services: MongoDB · Redis · Lejerli API
+#
+#  Usage:
+#    Development (hot reload via nodemon):
+#      docker compose up
+#
+#    Production build:
+#      docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+# ─────────────────────────────────────────────────────────────────────────
+
+networks:
+  lejerli-net:
+    driver: bridge
+
+volumes:
+  mongo-data:
+  redis-data:
+
+services:
+
+  # ── MongoDB ──────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7.0
+    container_name: lejerli-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: lejerli
+      MONGO_INITDB_ROOT_PASSWORD: lejerli_dev_pass
+      MONGO_INITDB_DATABASE: lejerli
+    volumes:
+      - mongo-data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/init.js:ro
+    networks:
+      - lejerli-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: lejerli-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - lejerli-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Lejerli API ───────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: lejerli-api
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://lejerli:lejerli_dev_pass@mongo:27017/lejerli?authSource=admin
+      REDIS_URL: redis://redis:6379
+      REDIS_DISABLED: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - lejerli-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Mongo Express (dev UI) — remove in production ─────────────────────────
+  mongo-express:
+    image: mongo-express:1.0.2-20-alpine3.19
+    container_name: lejerli-mongo-ui
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: lejerli
+      ME_CONFIG_MONGODB_ADMINPASSWORD: lejerli_dev_pass
+      ME_CONFIG_MONGODB_URL: mongodb://lejerli:lejerli_dev_pass@mongo:27017/
+      ME_CONFIG_BASICAUTH: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - lejerli-net
+    profiles:
+      - dev   # Only starts with: docker compose --profile dev up
