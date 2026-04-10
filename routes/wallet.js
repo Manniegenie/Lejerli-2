@@ -4,7 +4,8 @@ const { Spot }   = require('@binance/connector');
 const { protect } = require('../middleware/auth');
 const { validateKeys: validateCoinbaseKeys, fetchAccountsWithUSD: fetchCoinbaseBalances } = require('./coinbase');
 const { validateKeys: validateBybitKeys,   fetchAccountsWithUSD: fetchBybitBalances   } = require('./bybit');
-const { validateAddress: validateSolanaAddress, fetchBalancesWithUSD: fetchPhantomBalances } = require('./phantom');
+const { validateAddress: validateSolanaAddress, fetchBalancesWithUSD: fetchPhantomBalances  } = require('./phantom');
+const { fetchBalancesWithUSD: fetchEthBalances } = require('./ethereum');
 
 // ── Shared validation ─────────────────────────────────────────────────────────
 function validateKeys(apiKey, apiSecret) {
@@ -156,13 +157,24 @@ router.get('/balances/:exchange', protect, async (req, res) => {
     return res.status(400).json({ success: false, message: `${exchange} is not connected` });
   }
 
-  if (exchange === 'phantom') {
+  if (exchange === 'phantom' || exchange === 'jupiter' || exchange === 'raydium') {
     try {
-      const keys     = req.user.decryptApiKeys('phantom');
+      const keys     = req.user.decryptApiKeys(exchange);
       const balances = await fetchPhantomBalances(keys.apiKey);
       return res.status(200).json({ success: true, data: balances });
     } catch (err) {
-      console.error(`[wallet/balances] phantom: ${err.message}`);
+      console.error(`[wallet/balances] ${exchange}: ${err.message}`);
+      return res.status(200).json({ success: true, data: ex.snapshot?.balances || [], warning: 'Using cached snapshot' });
+    }
+  }
+
+  if (exchange === 'metamask' || exchange === 'uniswap') {
+    try {
+      const keys     = req.user.decryptApiKeys(exchange);
+      const balances = await fetchEthBalances(keys.apiKey);
+      return res.status(200).json({ success: true, data: balances });
+    } catch (err) {
+      console.error(`[wallet/balances] ${exchange}: ${err.message}`);
       return res.status(200).json({ success: true, data: ex.snapshot?.balances || [], warning: 'Using cached snapshot' });
     }
   }

@@ -1,10 +1,32 @@
 const express    = require('express');
 const { protect } = require('../middleware/auth');
 const Tree       = require('../models/tree');
+const { fetchBalancesWithUSD: fetchSolanaBalances } = require('./phantom');
+const { fetchBalancesWithUSD: fetchEthBalances    } = require('./ethereum');
 
 const router = express.Router();
 
-const EXCHANGE_NAMES = { binance: 'Binance', kraken: 'Kraken', coinbase: 'Coinbase' };
+const EXCHANGE_NAMES = {
+  binance: 'Binance', kraken: 'Kraken', coinbase: 'Coinbase', bybit_spot: 'Bybit',
+};
+
+const DEX_CHAIN = {
+  phantom: 'solana', jupiter: 'solana', raydium: 'solana',
+  metamask: 'ethereum', uniswap: 'ethereum',
+  trust: 'multi',
+};
+
+const DEX_DISPLAY = {
+  phantom: 'Phantom', jupiter: 'Jupiter', raydium: 'Raydium',
+  metamask: 'MetaMask', uniswap: 'Uniswap', trust: 'Trust Wallet',
+};
+
+// Native asset shown even when wallet balance is zero
+const DEX_NATIVE_ASSET = {
+  phantom: 'SOL', jupiter: 'SOL', raydium: 'SOL',
+  metamask: 'ETH', uniswap: 'ETH',
+  trust: 'Multi',
+};
 
 function fmtUSD(raw) {
   const n = parseFloat(raw);
@@ -38,11 +60,64 @@ router.get('/', protect, async (req, res) => {
     return (entry.sum / entry.count).toFixed(1) + '%';
   };
 
-  // ── CEX exchanges ────────────────────────────────────────────────────────
+  // ── CEX + DEX exchanges ──────────────────────────────────────────────────
   const exchanges = user.crypto?.exchanges || {};
   for (const [id, ex] of Object.entries(exchanges)) {
     if (!ex.connected) continue;
 
+    const isDex   = id in DEX_CHAIN;
+    const chain   = DEX_CHAIN[id];
+
+    // ── DEX on-chain wallet ──────────────────────────────────────────────
+    if (isDex) {
+      let walletAddress = '—';
+      let balances      = [];
+      let totalUSD      = 0;
+
+      try {
+        const keys = user.decryptApiKeys(id);
+        if (keys?.apiKey) {
+          walletAddress = keys.apiKey;
+          if (chain === 'solana') {
+            balances = await fetchSolanaBalances(walletAddress);
+          } else if (chain === 'ethereum') {
+            balances = await fetchEthBalances(walletAddress);
+          }
+          totalUSD = balances.reduce((s, b) => s + parseFloat(b.usdValue || '0'), 0);
+        }
+      } catch (_) {}
+
+      const addrShort = walletAddress !== '—'
+        ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
+        : '—';
+      const topAssets = balances.length
+        ? balances.slice(0, 3).map(b => b.asset).join(' / ')
+        : (DEX_NATIVE_ASSET[id] || '—');
+
+      rows.push({
+        id,
+        channel:     DEX_DISPLAY[id] || id,
+        type:        'DEX',
+        assets:      topAssets,
+        connection:  'On-Chain',
+        balance:     totalUSD > 0 ? fmtUSD(totalUSD.toFixed(2)) : '—',
+        mode:        'Read Only',
+        margin:      getMargin(id),
+        status:      'Active',
+        lastSynced:  ex.lastSynced  || null,
+        connectedAt: ex.connectedAt || null,
+        walletAddress: addrShort,
+        snapshot: {
+          totalUSD:    totalUSD > 0 ? totalUSD.toFixed(2) : null,
+          assetCount:  balances.length,
+          canTrade:    false,
+          lastUpdated: new Date(),
+        },
+      });
+      continue;
+    }
+
+    // ── CEX exchange ─────────────────────────────────────────────────────
     const snap     = ex.snapshot || {};
     const balances = (snap.balances || [])
       .filter(b => parseFloat(b.usdValue) > 0)
@@ -62,9 +137,8 @@ router.get('/', protect, async (req, res) => {
       mode:       snap.canTrade === true ? 'Active' : snap.canTrade === false ? 'Read Only' : '—',
       margin:     getMargin(id),
       status:     'Active',
-      lastSynced: ex.lastSynced  || null,
+      lastSynced:  ex.lastSynced  || null,
       connectedAt: ex.connectedAt || null,
-      // Extra fields used by the Connected Accounts card
       snapshot: {
         totalUSD:    snap.totalUSD    || null,
         assetCount:  balances.length,

@@ -79,6 +79,7 @@ app.use('/wallet',   authenticateToken, require('./routes/wallet'));
 app.use('/coinbase', authenticateToken, require('./routes/coinbase')); // Coinbase Advanced Trade
 app.use('/bybit',    authenticateToken, require('./routes/bybit'));    // Bybit v5
 app.use('/phantom',  authenticateToken, require('./routes/phantom'));  // Phantom/Solana
+app.use('/ethereum', authenticateToken, require('./routes/ethereum')); // MetaMask/EVM
 app.use('/channels', authenticateToken, require('./routes/channels')); // Connected channel rows
 app.use('/trees',    authenticateToken, require('./routes/trees'));    // Asset tracking trees
 

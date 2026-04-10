@@ -72,7 +72,18 @@ router.post('/:exchange', protect, async (req, res) => {
   const { permissions = {}, importRange = {} } = req.body;
 
   // ── 1. Validate exchange ─────────────────────────────────────────────────
-  const SUPPORTED = ['binance', 'kraken', 'coinbase'];
+  const SUPPORTED     = ['binance', 'kraken', 'coinbase'];
+  const DEX_EXCHANGES = new Set(['phantom', 'metamask', 'trust', 'jupiter', 'uniswap', 'raydium']);
+
+  if (DEX_EXCHANGES.has(exchange)) {
+    // On-chain wallets — no CEX API to sync against; acknowledge and return
+    return res.status(200).json({
+      success: true,
+      message: `${exchange} wallet connected. On-chain history sync coming soon.`,
+      data: { exchange, synced: false, reason: 'dex_no_sync' },
+    });
+  }
+
   if (!SUPPORTED.includes(exchange)) {
     return res.status(400).json({ success: false, message: `Unsupported exchange: ${exchange}` });
   }
