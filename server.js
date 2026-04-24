@@ -51,6 +51,25 @@ const apiLimiter = rateLimit({
 });
 app.use(apiLimiter);
 
+// Cached DB connection (works across serverless invocations)
+let dbConnected = false;
+async function connectDB() {
+  if (dbConnected) return;
+  await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lejerli');
+  dbConnected = true;
+  console.log('✅ MongoDB Connected');
+}
+
+// Ensure DB is ready before every request
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // JWT Auth Middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -94,18 +113,18 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, error: 'Internal Server Error' });
 });
 
-// Start
-mongoose
-  .connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/lejerli')
-  .then(() => {
-    console.log('✅ MongoDB Connected');
+// Export for Vercel serverless
+module.exports = app;
+
+// Only start listener when running locally
+if (!process.env.VERCEL) {
+  connectDB().then(() => {
+    require('./jobs/balancePoller').start();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🔥 Lejerli server running on port ${PORT}`);
     });
-    // Start background jobs after DB is ready
-    require('./jobs/balancePoller').start();
-  })
-  .catch((err) => {
+  }).catch((err) => {
     console.error('MongoDB connection error:', err);
     process.exit(1);
   });
+}
