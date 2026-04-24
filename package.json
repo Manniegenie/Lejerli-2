@@ -13,6 +13,7 @@
   "dependencies": {
     "@binance/connector": "^3.3.2",
     "@getbrevo/brevo": "^2.5.0",
+    "@hyperbridge/sdk": "^1.9.6",
     "axios": "^1.7.9",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

@@ -7,7 +7,14 @@
       "Bash(node -e:*)",
       "Bash(npx create-expo-app@latest Lejerli-frontend --template blank-typescript)",
       "Bash(npm install:*)",
-      "Bash(chmod +x \"C:\\\\Users\\\\HP\\\\Lejerli-frontend\\\\start-app.sh\")"
+      "Bash(chmod +x \"C:\\\\Users\\\\HP\\\\Lejerli-frontend\\\\start-app.sh\")",
+      "Bash(curl -s https://lejerli-2.vercel.app/health)",
+      "Bash(curl -s https://lejerli-2.vercel.app/)",
+      "Bash(curl -s -X POST https://lejerli-2.vercel.app/auth/register -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"test-ping@test.com\\\\\",\\\\\"password\\\\\":\\\\\"Test1234\\\\\"}\")",
+      "Bash(curl -s -X POST https://lejerli-2.vercel.app/api/v1/auth/register -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"test-ping@test.com\\\\\",\\\\\"password\\\\\":\\\\\"Test1234\\\\\"}\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
