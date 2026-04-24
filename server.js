@@ -16,6 +16,9 @@ app.set('trust proxy', 1);
 const allowedOrigins = [
   process.env.CLIENT_URL,
   'http://localhost:8081',
+  'http://localhost:8082',
+  'http://localhost:8083',
+  'http://localhost:19000',
   'http://localhost:19006',
   'https://www.lejerli.com',
   'https://lejerli.com',
