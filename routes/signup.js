@@ -39,19 +39,23 @@ router.post(
         return res.status(409).json({ success: false, message: 'User with this email or username already exists.' });
       }
 
-      const otp = generateOTP();
-      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      const skipVerification = process.env.SKIP_EMAIL_VERIFICATION === 'true';
+
+      const otp = skipVerification ? null : generateOTP();
+      const otpExpiresAt = skipVerification ? null : new Date(Date.now() + 10 * 60 * 1000);
 
       const user = await User.create({
         email, username, password,
+        emailVerified: skipVerification,
         emailOTP: otp,
         emailOTPExpiresAt: otpExpiresAt,
       });
 
-      // Fire-and-forget — don't block signup if email fails
-      sendEmailVerificationOTP(email, username, otp).catch(err =>
-        console.error('OTP email failed (non-blocking):', err.message)
-      );
+      if (!skipVerification) {
+        sendEmailVerificationOTP(email, username, otp).catch(err =>
+          console.error('OTP email failed (non-blocking):', err.message)
+        );
+      }
 
       res.status(201).json({
         success: true,
