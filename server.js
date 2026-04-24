@@ -107,6 +107,27 @@ app.get('/', (req, res) => {
   res.send(`🚀 Lejerli API running at ${new Date().toISOString()}`);
 });
 
+// One-time test account seed — only available when SKIP_EMAIL_VERIFICATION=true
+app.get('/dev/seed', async (req, res) => {
+  if (process.env.SKIP_EMAIL_VERIFICATION !== 'true') {
+    return res.status(404).json({ success: false, message: 'Not found' });
+  }
+
+  try {
+    const User = require('./models/user');
+    await User.deleteOne({ email: 'oakunne@gmail.com' });
+    await User.create({
+      email: 'oakunne@gmail.com',
+      username: 'oakunne',
+      password: 'Test@1234',
+      emailVerified: true,
+    });
+    res.json({ success: true, message: 'Test account ready — oakunne@gmail.com / Test@1234' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Error Handler
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
