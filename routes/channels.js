@@ -118,10 +118,43 @@ router.get('/', protect, async (req, res) => {
     }
 
     // ── CEX exchange ─────────────────────────────────────────────────────
-    const snap     = ex.snapshot || {};
-    const balances = (snap.balances || [])
+    let snap     = ex.snapshot || {};
+    let balances = (snap.balances || [])
       .filter(b => parseFloat(b.usdValue) > 0)
       .sort((a, b) => parseFloat(b.usdValue) - parseFloat(a.usdValue));
+
+    // Live-fetch if snapshot is empty (e.g. freshly connected, no sync yet)
+    if (!balances.length && id === 'binance') {
+      try {
+        const { Spot } = require('@binance/connector');
+        const keys     = user.decryptApiKeys('binance');
+        if (keys?.apiKey && keys?.apiSecret) {
+          const client    = new Spot(keys.apiKey, keys.apiSecret);
+          const [acctRes, priceRes] = await Promise.all([
+            client.account(),
+            client.tickerPrice(),
+          ]);
+          const priceMap = {};
+          priceRes.data.forEach(t => { priceMap[t.symbol] = parseFloat(t.price); });
+          const STABLE  = new Set(['USDT','BUSD','USDC','DAI','TUSD','FDUSD']);
+          const btcUsd  = priceMap['BTCUSDT'] || 0;
+          balances = acctRes.data.balances
+            .filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
+            .map(b => {
+              const qty = parseFloat(b.free) + parseFloat(b.locked);
+              let usdValue = 0;
+              if (STABLE.has(b.asset))                     usdValue = qty;
+              else if (priceMap[`${b.asset}USDT`])         usdValue = qty * priceMap[`${b.asset}USDT`];
+              else if (priceMap[`${b.asset}BTC`] && btcUsd) usdValue = qty * priceMap[`${b.asset}BTC`] * btcUsd;
+              return { asset: b.asset, free: b.free, locked: b.locked, usdValue: usdValue.toFixed(2) };
+            })
+            .filter(b => parseFloat(b.usdValue) > 0)
+            .sort((a, b) => parseFloat(b.usdValue) - parseFloat(a.usdValue));
+          const liveTotal = balances.reduce((s, b) => s + parseFloat(b.usdValue), 0);
+          snap = { ...snap, totalUSD: liveTotal.toFixed(2), canTrade: acctRes.data.canTrade };
+        }
+      } catch (_) {}
+    }
 
     const topAssets = balances.length
       ? balances.slice(0, 3).map(b => b.asset).join(' / ')
