@@ -1,8 +1,10 @@
 const express    = require('express');
 const { protect } = require('../middleware/auth');
 const Tree       = require('../models/tree');
-const { fetchBalancesWithUSD: fetchSolanaBalances } = require('./phantom');
-const { fetchBalancesWithUSD: fetchEthBalances    } = require('./ethereum');
+const { fetchBalancesWithUSD: fetchSolanaBalances }  = require('./phantom');
+const { fetchBalancesWithUSD: fetchEthBalances    }  = require('./ethereum');
+const { fetchAccountsWithUSD: fetchCoinbaseBalances } = require('./coinbase');
+const { fetchAccountsWithUSD: fetchBybitBalances    } = require('./bybit');
 
 const router = express.Router();
 
@@ -124,34 +126,50 @@ router.get('/', protect, async (req, res) => {
       .sort((a, b) => parseFloat(b.usdValue) - parseFloat(a.usdValue));
 
     // Live-fetch if snapshot is empty (e.g. freshly connected, no sync yet)
-    if (!balances.length && id === 'binance') {
+    if (!balances.length) {
       try {
-        const { Spot } = require('@binance/connector');
-        const keys     = user.decryptApiKeys('binance');
+        const keys = user.decryptApiKeys(id);
         if (keys?.apiKey && keys?.apiSecret) {
-          const client    = new Spot(keys.apiKey, keys.apiSecret);
-          const [acctRes, priceRes] = await Promise.all([
-            client.account(),
-            client.tickerPrice(),
-          ]);
-          const priceMap = {};
-          priceRes.data.forEach(t => { priceMap[t.symbol] = parseFloat(t.price); });
-          const STABLE  = new Set(['USDT','BUSD','USDC','DAI','TUSD','FDUSD']);
-          const btcUsd  = priceMap['BTCUSDT'] || 0;
-          balances = acctRes.data.balances
-            .filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
-            .map(b => {
-              const qty = parseFloat(b.free) + parseFloat(b.locked);
-              let usdValue = 0;
-              if (STABLE.has(b.asset))                     usdValue = qty;
-              else if (priceMap[`${b.asset}USDT`])         usdValue = qty * priceMap[`${b.asset}USDT`];
-              else if (priceMap[`${b.asset}BTC`] && btcUsd) usdValue = qty * priceMap[`${b.asset}BTC`] * btcUsd;
-              return { asset: b.asset, free: b.free, locked: b.locked, usdValue: usdValue.toFixed(2) };
-            })
-            .filter(b => parseFloat(b.usdValue) > 0)
-            .sort((a, b) => parseFloat(b.usdValue) - parseFloat(a.usdValue));
-          const liveTotal = balances.reduce((s, b) => s + parseFloat(b.usdValue), 0);
-          snap = { ...snap, totalUSD: liveTotal.toFixed(2), canTrade: acctRes.data.canTrade };
+          let liveBalances = [];
+
+          if (id === 'binance') {
+            const { Spot } = require('@binance/connector');
+            const client   = new Spot(keys.apiKey, keys.apiSecret);
+            const [acctRes, priceRes] = await Promise.all([client.account(), client.tickerPrice()]);
+            const priceMap = {};
+            priceRes.data.forEach(t => { priceMap[t.symbol] = parseFloat(t.price); });
+            const STABLE = new Set(['USDT','BUSD','USDC','DAI','TUSD','FDUSD']);
+            const btcUsd = priceMap['BTCUSDT'] || 0;
+            liveBalances = acctRes.data.balances
+              .filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
+              .map(b => {
+                const qty = parseFloat(b.free) + parseFloat(b.locked);
+                let usdValue = 0;
+                if (STABLE.has(b.asset))                      usdValue = qty;
+                else if (priceMap[`${b.asset}USDT`])          usdValue = qty * priceMap[`${b.asset}USDT`];
+                else if (priceMap[`${b.asset}BTC`] && btcUsd) usdValue = qty * priceMap[`${b.asset}BTC`] * btcUsd;
+                return { asset: b.asset, free: b.free, locked: b.locked, usdValue: usdValue.toFixed(2) };
+              });
+            snap = { ...snap, canTrade: acctRes.data.canTrade };
+          } else if (id === 'coinbase') {
+            liveBalances = await fetchCoinbaseBalances(keys.apiKey, keys.apiSecret);
+          } else if (id === 'bybit_spot') {
+            liveBalances = await fetchBybitBalances(keys.apiKey, keys.apiSecret);
+          } else if (id === 'kraken') {
+            const krakenService = require('../services/kraken');
+            krakenService.connect(keys.apiKey, keys.apiSecret);
+            const krakenBalances = await krakenService.getAccountBalance();
+            liveBalances = Object.entries(krakenBalances)
+              .filter(([, qty]) => parseFloat(qty) > 0)
+              .map(([asset, qty]) => ({ asset, free: qty, locked: '0', usdValue: '0' }));
+          }
+
+          balances = liveBalances
+            .filter(b => parseFloat(b.usdValue ?? b.free) > 0)
+            .sort((a, b) => parseFloat(b.usdValue || '0') - parseFloat(a.usdValue || '0'));
+
+          const liveTotal = balances.reduce((s, b) => s + parseFloat(b.usdValue || '0'), 0);
+          if (liveTotal > 0) snap = { ...snap, totalUSD: liveTotal.toFixed(2) };
         }
       } catch (_) {}
     }
