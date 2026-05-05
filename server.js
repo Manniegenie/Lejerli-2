@@ -15,11 +15,6 @@ app.set('trust proxy', 1);
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
-  'http://localhost:8081',
-  'http://localhost:8082',
-  'http://localhost:8083',
-  'http://localhost:19000',
-  'http://localhost:19006',
   'https://www.lejerli.com',
   'https://lejerli.com',
 ].filter(Boolean);
@@ -28,6 +23,8 @@ app.use(
   cors({
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
+      // Allow any localhost port in development
+      if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       console.warn(`CORS blocked: ${origin}`);
       callback(new Error('Not allowed by CORS'));
