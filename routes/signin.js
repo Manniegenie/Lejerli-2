@@ -42,19 +42,18 @@ router.post(
 
       if (!isMatch) {
         const newAttempts = (user.loginAttempts || 0) + 1;
-        user.loginAttempts = newAttempts;
 
         if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
-          user.lockUntil = new Date(Date.now() + LOCK_TIME);
-          await user.save();
+          const lockUntil = new Date(Date.now() + LOCK_TIME);
+          await User.updateOne({ _id: user._id }, { $set: { loginAttempts: newAttempts, lockUntil } });
           return res.status(423).json({
             success: false,
             message: 'Account locked due to too many failed attempts. Try again in 6 hours.',
-            lockedUntil: user.lockUntil.toISOString(),
+            lockedUntil: lockUntil.toISOString(),
           });
         }
 
-        await user.save();
+        await User.updateOne({ _id: user._id }, { $set: { loginAttempts: newAttempts } });
         return res.status(401).json({
           success: false,
           message: `Invalid credentials. ${MAX_LOGIN_ATTEMPTS - newAttempts} attempt(s) remaining.`,
@@ -62,9 +61,7 @@ router.post(
       }
 
       // Reset attempts on success
-      user.loginAttempts = 0;
-      user.lockUntil = null;
-      await user.save();
+      await User.updateOne({ _id: user._id }, { $set: { loginAttempts: 0, lockUntil: null } });
 
       const token = jwt.sign(
         { id: user._id, email: user.email, username: user.username },
