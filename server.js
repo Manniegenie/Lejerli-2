@@ -1,11 +1,17 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
 const mongoose = require('mongoose');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
-const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const { Server: SocketIOServer } = require('socket.io');
+
+const User = require('./models/user');
+const { checkChannelPermission } = require('./middleware/permissions');
+const { createMessage, setIo } = require('./services/MessageService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -54,7 +60,9 @@ const apiLimiter = rateLimit({
 });
 app.use(apiLimiter);
 
-// Cached DB connection (works across serverless invocations)
+// Cached DB connection (works across serverless invocations; see plan doc —
+// deployment is moving to a persistent PM2/VPS process, but this stays
+// harmless either way since it's a no-op after the first connect).
 let dbConnected = false;
 async function connectDB() {
   if (dbConnected) return;
@@ -73,62 +81,17 @@ app.use(async (req, res, next) => {
   }
 });
 
-// JWT Auth Middleware
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, error: 'Unauthorized: No token provided.' });
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ success: false, error: 'Forbidden: Invalid token.' });
-    req.user = user;
-    next();
-  });
-};
-
-// Public Routes
-app.use('/signin', require('./routes/signin'));
-app.use('/signup', require('./routes/signup'));
-app.use('/verify', require('./routes/verify'));
-app.use('/news',   require('./routes/news'));    // Economic news feed
-app.use('/clocks', require('./routes/clocks')); // World clock times for all timezones
-app.use('/tokens',    require('./routes/tokens'));    // Token icon map from CoinGecko
-app.use('/exchanges', require('./routes/exchanges')); // Supported CEX list + logos
-
-// Protected Routes
-app.use('/sync',     authenticateToken, require('./routes/sync'));     // 12-month historical data sync
-app.use('/wallet',   authenticateToken, require('./routes/wallet'));
-app.use('/coinbase', authenticateToken, require('./routes/coinbase')); // Coinbase Advanced Trade
-app.use('/bybit',    authenticateToken, require('./routes/bybit'));    // Bybit v5
-app.use('/phantom',  authenticateToken, require('./routes/phantom'));  // Phantom/Solana
-app.use('/ethereum', authenticateToken, require('./routes/ethereum')); // MetaMask/EVM
-app.use('/channels', authenticateToken, require('./routes/channels')); // Connected channel rows
-app.use('/trees',    authenticateToken, require('./routes/trees'));    // Asset tracking trees
+// Routes
+app.use('/auth', require('./routes/auth'));
+app.use('/desks', require('./routes/desks'));
+app.use('/rooms', require('./routes/rooms'));
+app.use('/channels', require('./routes/channels'));
+app.use('/me', require('./routes/me'));
+app.use('/invites', require('./routes/invites'));
 
 // Health Check
 app.get('/', (req, res) => {
   res.send(`🚀 Lejerli API running at ${new Date().toISOString()}`);
-});
-
-// One-time test account seed — only available when SKIP_EMAIL_VERIFICATION=true
-app.get('/dev/seed', async (req, res) => {
-  if (process.env.SKIP_EMAIL_VERIFICATION !== 'true') {
-    return res.status(404).json({ success: false, message: 'Not found' });
-  }
-
-  try {
-    const User = require('./models/user');
-    await User.deleteOne({ email: 'oakunne@gmail.com' });
-    await User.create({
-      email: 'oakunne@gmail.com',
-      username: 'oakunne',
-      password: 'Test@1234',
-      emailVerified: true,
-    });
-    res.json({ success: true, message: 'Test account ready — oakunne@gmail.com / Test@1234' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
 });
 
 // Error Handler
@@ -137,14 +100,85 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, error: 'Internal Server Error' });
 });
 
-// Export for Vercel serverless
+// HTTP server wraps the Express app so Socket.IO can share the same port
+// (interim — see plan doc re: Vercel vs PM2/VPS; `app` is still exported
+// below for the serverless entrypoint, which never reaches this).
+const server = http.createServer(app);
+
+const io = new SocketIOServer(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+});
+
+// Authenticate every socket connection the same way `protect` (middleware/auth.js)
+// authenticates HTTP requests — jwt.verify against JWT_SECRET, then load the User.
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error('Not authorized, no token'));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return next(new Error('Not authorized, user not found'));
+    }
+
+    socket.user = user;
+    next();
+  } catch (error) {
+    next(new Error('Not authorized, token failed'));
+  }
+});
+
+io.on('connection', (socket) => {
+  // join_channel {channelId} — read-gated via checkChannelPermission, the
+  // same single access-control entry point the REST routes use.
+  socket.on('join_channel', async (payload) => {
+    try {
+      const channelId = payload && payload.channelId;
+      const permission = await checkChannelPermission(socket.user, channelId, 'read');
+      if (!permission.allowed) {
+        return socket.emit('error', { message: 'Not permitted' });
+      }
+      socket.join(channelId.toString());
+    } catch (error) {
+      console.error('join_channel error:', error.message);
+      socket.emit('error', { message: 'Not permitted' });
+    }
+  });
+
+  // send_message {channelId, text} — write-gated, then persisted and
+  // broadcast via the shared createMessage() helper (services/MessageService.js).
+  socket.on('send_message', async (payload) => {
+    try {
+      const channelId = payload && payload.channelId;
+      const text = payload && payload.text;
+      const permission = await checkChannelPermission(socket.user, channelId, 'write');
+      if (!permission.allowed) {
+        return socket.emit('error', { message: 'Not permitted' });
+      }
+      await createMessage({ channelId, senderId: socket.user._id, text });
+    } catch (error) {
+      console.error('send_message error:', error.message);
+      socket.emit('error', { message: 'Not permitted' });
+    }
+  });
+});
+
+setIo(io);
+
+// Export for Vercel serverless (interim — deployment is moving to PM2/VPS, see plan doc)
 module.exports = app;
 
 // Only start listener when running locally
 if (!process.env.VERCEL) {
   connectDB().then(() => {
-    require('./jobs/balancePoller').start();
-    app.listen(PORT, '0.0.0.0', () => {
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`🔥 Lejerli server running on port ${PORT}`);
     });
   }).catch((err) => {

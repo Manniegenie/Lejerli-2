@@ -1,85 +1,106 @@
 const brevo = require('@getbrevo/brevo');
 require('dotenv').config();
 
+// Single module-level instance, reused for every send — matches the pattern
+// ported from /Users/mac/Projects/Bramp-Server/services/EmailService.js.
 const apiInstance = new brevo.TransactionalEmailsApi();
 apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, process.env.BREVO_API_KEY);
 
-const COMPANY_NAME  = process.env.COMPANY_NAME  || 'Lejerli';
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@lejerli.com';
-const SENDER_EMAIL  = process.env.SENDER_EMAIL  || process.env.SUPPORT_EMAIL || 'noreply@lejerli.com';
-const SENDER_NAME   = process.env.SENDER_NAME   || process.env.COMPANY_NAME  || 'Lejerli';
-
-function safeParseTemplateId(envVar, fallback = null) {
-  const parsed = parseInt(envVar);
-  if (isNaN(parsed)) return fallback;
-  return parsed;
+function safeParseTemplateId(val) {
+  const n = parseInt(val, 10);
+  return (!isNaN(n) && n > 0) ? n : null;
 }
 
-function formatDate(date) {
-  const d = date instanceof Date ? date : new Date(date || Date.now());
-  return d.toLocaleString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: true,
-  });
-}
-
-async function sendEmail({ to, name, templateId, params = {}, htmlContent = null }) {
-  if (!process.env.BREVO_API_KEY) {
-    throw new Error('BREVO_API_KEY is not configured');
+/**
+ * Core sender — template-ID driven only, no raw HTML in the main path.
+ */
+async function sendEmail({ to, name, templateId, params = {}, options = {} }) {
+  if (!templateId || isNaN(templateId) || templateId <= 0) {
+    throw new Error(`Invalid template ID: ${templateId}. Check your BREVO_TEMPLATE_* environment variables.`);
   }
 
   const email = new brevo.SendSmtpEmail();
   email.to = [{ email: to, name }];
-  email.sender = { email: SENDER_EMAIL, name: SENDER_NAME };
+  email.templateId = templateId;
+  email.params = params;
+  if (options.replyTo) email.replyTo = options.replyTo;
+  if (options.headers) email.headers = options.headers;
 
-  if (templateId) {
-    email.templateId = templateId;
-    email.params = params;
-  } else {
-    // Fallback: inline HTML
-    email.subject = params.subject || `${COMPANY_NAME} - Verification Code`;
-    email.htmlContent = htmlContent;
-  }
-
-  console.log(`📧 Sending email to ${to} [Template: ${templateId || 'inline'}]`);
-  const response = await apiInstance.sendTransacEmail(email);
-  console.log('✅ Email sent:', response.body?.messageId || response.messageId);
-  return { success: true, messageId: response.body?.messageId || response.messageId };
-}
-
-async function sendEmailVerificationOTP(to, name, otp, expiryMinutes = 10) {
   try {
-    const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_EMAIL_VERIFICATION);
-    const expiryTime = new Date(Date.now() + expiryMinutes * 60 * 1000);
-
-    const params = {
-      username:      String(name || 'User'),
-      otp:           String(otp),
-      expiryMinutes: String(expiryMinutes),
-      expiryTime:    formatDate(expiryTime),
-      companyName:   String(COMPANY_NAME),
-      supportEmail:  String(SUPPORT_EMAIL),
-    };
-
-    const htmlContent = `
-      <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#0a0a0a;color:#fff;border-radius:12px">
-        <h2 style="color:#F26522">Verify your email</h2>
-        <p>Hi ${name || 'there'},</p>
-        <p>Your ${COMPANY_NAME} verification code is:</p>
-        <div style="font-size:40px;font-weight:700;letter-spacing:12px;text-align:center;padding:24px;background:#1a1a1a;border-radius:8px;color:#F26522;margin:24px 0">
-          ${otp}
-        </div>
-        <p style="color:#888">This code expires in <strong style="color:#fff">${expiryMinutes} minutes</strong> (${formatDate(expiryTime)}).</p>
-        <p style="color:#888;font-size:12px">If you didn't request this, ignore this email.</p>
-        <p style="color:#555;font-size:12px">${COMPANY_NAME} · ${SUPPORT_EMAIL}</p>
-      </div>
-    `;
-
-    return await sendEmail({ to, name, templateId, params, htmlContent });
+    const response = await apiInstance.sendTransacEmail(email);
+    const messageId = response.body?.messageId || response.messageId || 'No message ID';
+    console.log(`Email sent to ${to}: ${messageId}`);
+    return { success: true, messageId };
   } catch (error) {
-    console.error('Failed to send verification OTP:', error.message);
+    console.error(`Error sending email to ${to}:`, error.response?.body || error.message);
     throw error;
   }
 }
 
-module.exports = { sendEmailVerificationOTP };
+/**
+ * The primary auth path (§1/§11 step 2 — signup/login is email + OTP).
+ * A send failure here is fatal to the caller's request (the user can't
+ * proceed without the code) — that's enforced by the route, not this
+ * function, which simply throws on failure like the rest of the module.
+ */
+async function sendOtpEmail(to, name, otpCode, expirationMinutes = 10) {
+  const otpTemplateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_OTP);
+  const signupTemplateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_SIGNUP);
+  const templateId = otpTemplateId || signupTemplateId;
+
+  if (!templateId) {
+    // Local-dev bypass only — never silently succeeds in production. Lets
+    // signup/login be tested end-to-end before Brevo templates are set up.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('BREVO_TEMPLATE_OTP or BREVO_TEMPLATE_SIGNUP must be set with a valid template ID');
+    }
+    console.warn(`[dev] Brevo not configured — OTP for ${to}: ${otpCode} (expires in ${expirationMinutes}m)`);
+    return { success: true, messageId: 'dev-bypass' };
+  }
+
+  return sendEmail({
+    to,
+    name,
+    templateId,
+    params: {
+      username: String(name || 'there'),
+      otpCode: String(otpCode),
+      expirationMinutes: String(expirationMinutes),
+    },
+  });
+}
+
+/**
+ * Invite email (floor member or partner) — carries the deep link the
+ * recipient uses to join, whether or not they already have an account
+ * (the accept flow handles both: log in if they exist, sign up if not).
+ * Non-fatal by design: the Invite record already exists in Mongo by the
+ * time this is called, so a delivery failure here is logged, not thrown —
+ * the desk Principal still gets a success response and can be told to
+ * resend later, rather than the whole request failing over an email hiccup.
+ */
+async function sendInviteEmail(to, { inviterName, deskName, type, deepLink }) {
+  const templateId = safeParseTemplateId(process.env.BREVO_TEMPLATE_INVITE);
+
+  if (!templateId) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('BREVO_TEMPLATE_INVITE not configured — invite email not sent to', to);
+      return { success: false };
+    }
+    console.warn(`[dev] Brevo not configured — invite for ${to} (${type} on "${deskName}"): ${deepLink}`);
+    return { success: true, messageId: 'dev-bypass' };
+  }
+
+  return sendEmail({
+    to,
+    templateId,
+    params: {
+      inviterName: String(inviterName || 'A colleague'),
+      deskName: String(deskName),
+      type: String(type),
+      deepLink: String(deepLink),
+    },
+  });
+}
+
+module.exports = { sendEmail, sendOtpEmail, sendInviteEmail, safeParseTemplateId };

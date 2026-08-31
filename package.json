@@ -1,21 +1,24 @@
 {
   "name": "lejerli",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest --runInBand --forceExit",
+    "test:watch": "jest --watch",
     "start": "node server.js"
   },
   "author": "",
   "license": "ISC",
   "keywords": [],
-  "description": "Crypto Exchange Data Aggregator",
+  "description": "Lejerli — verified, end-to-end encrypted communication platform for trading desks",
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ]
+  },
   "dependencies": {
-    "@binance/connector": "^3.3.2",
-    "@getbrevo/brevo": "^2.5.0",
-    "@hyperbridge/sdk": "^1.9.6",
-    "axios": "^1.7.9",
-    "bcryptjs": "^2.4.3",
+    "@getbrevo/brevo": "^3.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
@@ -25,6 +28,9 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.21.0",
     "morgan": "^1.10.1",
-    "node-cron": "^4.2.1"
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }

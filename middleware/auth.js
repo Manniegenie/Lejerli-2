@@ -2,62 +2,29 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 
 /**
- * Authentication Middleware
- * Protects routes by verifying JWT tokens
- */
-
-/**
- * Verify JWT token and attach user to request
+ * Verifies the JWT access token and attaches the User document to req.user.
+ * This is the single JWT-verification path for the whole app — server.js
+ * previously had a second, inconsistent inline implementation; that's gone.
  */
 const protect = async (req, res, next) => {
-  let token;
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, message: 'Not authorized, no token' });
+  }
 
-  // Check for token in Authorization header
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    try {
-      // Get token from header
-      token = req.headers.authorization.split(' ')[1];
+  try {
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      // Get user from token (exclude password)
-      req.user = await User.findById(decoded.id).select('-password');
-
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      next();
-    } catch (error) {
-      console.error('Auth middleware error:', error.message);
-      return res.status(401).json({
-        success: false,
-        message: 'Not authorized, token failed'
-      });
+    req.user = await User.findById(decoded.id);
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'User not found' });
     }
-  }
 
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: 'Not authorized, no token'
-    });
+    next();
+  } catch (error) {
+    return res.status(401).json({ success: false, message: 'Not authorized, token failed' });
   }
 };
 
-/**
- * Generate JWT token
- * @param {string} id - User ID
- * @returns {string} JWT token
- */
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: '30d' // Token expires in 30 days
-  });
-};
-
-module.exports = { protect, generateToken };
+module.exports = { protect };
