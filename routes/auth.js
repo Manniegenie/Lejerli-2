@@ -5,27 +5,12 @@ const { body, validationResult } = require('express-validator');
 const router = express.Router();
 
 const User = require('../models/user');
-const EmailOTP = require('../models/emailOtp');
-const { sendOtpEmail } = require('../services/EmailService');
 const { protect } = require('../middleware/auth');
 
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute
-const MAX_OTP_ATTEMPTS = 5;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCK_TIME_MS = 6 * 60 * 60 * 1000; // 6 hours
 const ACCESS_TOKEN_TTL = '1h';
 const REFRESH_TOKEN_TTL = '7d';
-
-function generateOtpCode(length = 6) {
-  let otp = '';
-  for (let i = 0; i < length; i++) otp += Math.floor(Math.random() * 10);
-  return otp;
-}
-
-function hashOtp(code) {
-  return crypto.createHash('sha256').update(code).digest('hex');
-}
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -46,70 +31,16 @@ function issueTokens(user) {
 }
 
 /**
- * POST /auth/request-otp
- * Single entry point for both signup and login — find-or-create the user,
- * issue a fresh OTP, email it. The client never has to know in advance
- * whether an account exists.
+ * POST /auth/signup
+ * Creates the account and logs the user straight in — no separate email
+ * verification step (that was OTP's job; email+password replaces it wholesale).
  */
 router.post(
-  '/request-otp',
-  [body('email').trim().isEmail().withMessage('Valid email is required.').normalizeEmail()],
-  async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, message: 'Validation failed.', errors: errors.array() });
-    }
-
-    const { email } = req.body;
-
-    try {
-      let user = await User.findOne({ email });
-      const purpose = user ? 'LOGIN' : 'SIGNUP';
-
-      if (user?.isLocked()) {
-        const minutesRemaining = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
-        return res.status(423).json({
-          success: false,
-          message: `Account locked due to multiple failed attempts. Try again in ${minutesRemaining} minute(s).`,
-        });
-      }
-
-      const recentOtp = await EmailOTP.findOne({ email }).sort({ createdAt: -1 });
-      if (recentOtp && Date.now() - recentOtp.createdAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
-        return res.status(429).json({ success: false, message: 'Please wait a moment before requesting another code.' });
-      }
-
-      if (!user) {
-        user = await User.create({ email });
-      }
-
-      const code = generateOtpCode();
-      await EmailOTP.create({
-        email,
-        codeHash: hashOtp(code),
-        purpose,
-        expiresAt: new Date(Date.now() + OTP_TTL_MS),
-      });
-
-      await sendOtpEmail(email, user.displayName, code, OTP_TTL_MS / 60000);
-
-      res.status(200).json({ success: true, message: 'Verification code sent.', data: { purpose } });
-    } catch (error) {
-      console.error('request-otp error:', error.message);
-      res.status(500).json({ success: false, message: 'Server error while sending verification code.' });
-    }
-  }
-);
-
-/**
- * POST /auth/verify-otp
- * Verifies the most recent OTP for the email and issues tokens.
- */
-router.post(
-  '/verify-otp',
+  '/signup',
   [
     body('email').trim().isEmail().withMessage('Valid email is required.').normalizeEmail(),
-    body('otp').trim().isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits.'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters.'),
+    body('displayName').optional().trim().isLength({ max: 80 }),
   ],
   async (req, res) => {
     const errors = validationResult(req);
@@ -117,62 +48,30 @@ router.post(
       return res.status(400).json({ success: false, message: 'Validation failed.', errors: errors.array() });
     }
 
-    const { email, otp } = req.body;
+    const { email, password, displayName } = req.body;
 
     try {
-      const user = await User.findOne({ email });
-      if (!user) {
-        return res.status(404).json({ success: false, message: 'No account found for this email.' });
+      const existing = await User.findOne({ email });
+      if (existing) {
+        return res.status(409).json({ success: false, message: 'An account with this email already exists.' });
       }
 
-      if (user.isLocked()) {
-        const minutesRemaining = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
-        return res.status(423).json({
-          success: false,
-          message: `Account locked due to multiple failed attempts. Try again in ${minutesRemaining} minute(s).`,
-        });
-      }
-
-      const otpRecord = await EmailOTP.findOne({ email }).sort({ createdAt: -1 });
-
-      if (!otpRecord || otpRecord.expiresAt < new Date()) {
-        return res.status(401).json({ success: false, message: 'Verification code has expired. Request a new one.' });
-      }
-
-      if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
-        return res.status(401).json({ success: false, message: 'Too many attempts. Request a new code.' });
-      }
-
-      if (otpRecord.codeHash !== hashOtp(otp)) {
-        otpRecord.attempts += 1;
-        await otpRecord.save();
-
-        const newAttempts = (user.loginAttempts || 0) + 1;
-        if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
-          user.loginAttempts = newAttempts;
-          user.lockUntil = new Date(Date.now() + LOCK_TIME_MS);
-          await user.save();
-          return res.status(423).json({ success: false, message: 'Account locked due to too many failed attempts. Try again in 6 hours.' });
-        }
-
-        user.loginAttempts = newAttempts;
-        await user.save();
-        return res.status(401).json({ success: false, message: 'Invalid verification code.' });
-      }
-
-      // Success — consume the OTP, reset attempt counters.
-      await EmailOTP.deleteMany({ email });
-      user.loginAttempts = 0;
-      user.lockUntil = null;
-      if (!user.emailVerifiedAt) user.emailVerifiedAt = new Date();
+      // Plain password assigned here — the pre-save hook in models/user.js
+      // hashes it exactly once. Never call bcrypt in this route.
+      const user = await User.create({
+        email,
+        password,
+        displayName: displayName || '',
+        emailVerifiedAt: new Date(),
+      });
 
       const { token, refreshToken } = issueTokens(user);
       user.refreshTokenHash = hashToken(refreshToken);
       await user.save();
 
-      res.status(200).json({
+      res.status(201).json({
         success: true,
-        message: 'Verified successfully.',
+        message: 'Account created.',
         data: {
           id: user._id,
           email: user.email,
@@ -183,8 +82,80 @@ router.post(
         },
       });
     } catch (error) {
-      console.error('verify-otp error:', error.message);
-      res.status(500).json({ success: false, message: 'Server error during verification.' });
+      console.error('signup error:', error.message);
+      res.status(500).json({ success: false, message: 'Server error during signup.' });
+    }
+  }
+);
+
+/**
+ * POST /auth/login
+ */
+router.post(
+  '/login',
+  [
+    body('email').trim().isEmail().withMessage('Valid email is required.').normalizeEmail(),
+    body('password').notEmpty().withMessage('Password is required.'),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Validation failed.', errors: errors.array() });
+    }
+
+    const { email, password } = req.body;
+
+    try {
+      const user = await User.findOne({ email }).select('+password');
+      if (!user) {
+        return res.status(401).json({ success: false, message: 'Invalid email or password.' });
+      }
+
+      if (user.isLocked()) {
+        const minutesRemaining = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
+        return res.status(423).json({
+          success: false,
+          message: `Account locked due to multiple failed attempts. Try again in ${minutesRemaining} minute(s).`,
+        });
+      }
+
+      const matches = await user.comparePassword(password);
+      if (!matches) {
+        const newAttempts = (user.loginAttempts || 0) + 1;
+        if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+          user.loginAttempts = newAttempts;
+          user.lockUntil = new Date(Date.now() + LOCK_TIME_MS);
+          await user.save();
+          return res.status(423).json({ success: false, message: 'Account locked due to too many failed attempts. Try again in 6 hours.' });
+        }
+
+        user.loginAttempts = newAttempts;
+        await user.save();
+        return res.status(401).json({ success: false, message: 'Invalid email or password.' });
+      }
+
+      user.loginAttempts = 0;
+      user.lockUntil = null;
+
+      const { token, refreshToken } = issueTokens(user);
+      user.refreshTokenHash = hashToken(refreshToken);
+      await user.save();
+
+      res.status(200).json({
+        success: true,
+        message: 'Logged in.',
+        data: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName,
+          verificationTier: user.verificationTier,
+          token,
+          refreshToken,
+        },
+      });
+    } catch (error) {
+      console.error('login error:', error.message);
+      res.status(500).json({ success: false, message: 'Server error during login.' });
     }
   }
 );
